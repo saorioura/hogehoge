@@ -1,108 +1,115 @@
-import cv2
-import os
-import numpy as np
-from matplotlib import pyplot as plt
-import albumentations as albu
+import numpy as np 
+# import os
+# import skimage.io as io
+# import skimage.transform as trans
+
+import tensorflow as tf
+from tensorflow.contrib.keras.api.keras.layers import *
+from tensorflow.contrib.keras.api.keras.optimizers import *
+from tensorflow.contrib.keras.api.keras.models import *
+from tensorflow.contrib.keras.api.keras.callbacks import ModelCheckpoint, LearningRateScheduler
 
 
-# affine変換
-# flop
-# bright
-# shade
-# 背景と合成
+def unet(pretrained_weights = None,input_size = (256,256,1)):
+    inputs = Input(input_size)
+    conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(inputs)
+    conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv1)
+    pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
+    conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool1)
+    conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv2)
+    pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
+    conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool2)
+    conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv3)
+    pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
+    conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool3)
+    conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv4)
+    drop4 = Dropout(0.5)(conv4)
+    pool4 = MaxPooling2D(pool_size=(2, 2))(drop4)
 
-IMG_DIR = './image/'
-MASK_DIR = './label/'
+    conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool4)
+    conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv5)
+    drop5 = Dropout(0.5)(conv5)
 
-class SegmentationDataset():
-    def __init__(self, img_dir, mask_dir, transforms):
-        self.img_dir = img_dir
-        self.mask_dir = mask_dir
-        self.bg_dir = 'background'
-        self.transforms = transforms
-        self.img_ids = sorted(os.listdir(self.img_dir))
-        self.mask_ids = sorted(os.listdir(self.mask_dir))
-        self.bg_ids = sorted(os.listdir(self.bg_dir))
+    up6 = Conv2D(512, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(drop5))
+    merge6 = concatenate([drop4,up6], axis = 3)
+    conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge6)
+    conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv6)
 
+    up7 = Conv2D(256, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv6))
+    merge7 = concatenate([conv3,up7], axis = 3)
+    conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge7)
+    conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv7)
 
-    def getitem(self, idx):
-        img_name = self.img_ids[idx]
-        img = cv2.imread(os.path.join(self.img_dir, img_name))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    up8 = Conv2D(128, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv7))
+    merge8 = concatenate([conv2,up8], axis = 3)
+    conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge8)
+    conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv8)
 
-        mask_name = self.mask_ids[idx]
-        mask = cv2.imread(os.path.join(self.mask_dir, mask_name))
-        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
+    up9 = Conv2D(64, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv8))
+    merge9 = concatenate([conv1,up9], axis = 3)
+    conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge9)
+    conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv9)
+    conv9 = Conv2D(2, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv9)
+    conv10 = Conv2D(1, 1, activation = 'sigmoid')(conv9)
 
-        # 背景合成
-        bg_name = self.bg_ids[idx]
-        img_bg = cv2.imread(os.path.join(self.bg_dir, bg_name))
-        img_bg = cv2.cvtColor(img_bg, cv2.COLOR_BGR2RGB)
-        # マスク画像の白黒を反転
-        img_maskn = cv2.bitwise_not(mask)
+    model = Model(inputs = inputs, outputs = conv10)
 
-        # 背景からimg_msknの部分を切り出す
-        img_bg = cv2.bitwise_and(img_bg, img_maskn)
+    model.compile(optimizer = Adam(lr = 1e-4), loss = 'binary_crossentropy', metrics = ['accuracy'])
+    
+    #model.summary()
 
-        # 背景と合成
-        img = cv2.bitwise_or(img_bg, img)
+    if(pretrained_weights):
+        model.load_weights(pretrained_weights)
 
-        augmented = self.transforms(image=img, mask=mask)
-        img, mask = augmented['image'], augmented['mask']
-
-
-        return img, mask
-
-    def random_erasing(self, x):
-        image = np.zeros_like(x)
-        size = x.shape[2]
-        offset = np.random.randint(-4, 5, size=(2,))
-        mirror = np.random.randint(2)
-        remove = np.random.randint(2)
-        top, left = offset
-        left = max(0, left)
-        top = max(0, top)
-        right = min(size, left + size)
-        bottom = min(size, top + size)
-        if mirror > 0:
-            x = x[:, :, ::-1]
-        image[:, size - bottom:size - top, size - right:size - left] = x[:, top:bottom, left:right]
-        # Remove erasing start
-        if remove > 0:
-            while True:
-                s = np.random.uniform(0.02, 0.4) * size * size
-                r = np.random.uniform(-np.log(3.0), np.log(3.0))
-                r = np.exp(r)
-                w = int(np.sqrt(s / r))
-                h = int(np.sqrt(s * r))
-                left = np.random.randint(0, size)
-                top = np.random.randint(0, size)
-                if left + w < size and top + h < size:
-                    break
-            c = np.random.randint(-128, 128)
-            image[:, top:top + h, left:left + w] = c
-        # Remove erasing end
-        return image
+    return model
 
 
-def get_augmentation():
-    train_transform = [
-        albu.Blur(),
-        albu.GaussNoise(),
-        albu.ShiftScaleRotate(shift_limit=0.4, scale_limit=0.2, rotate_limit=90),
-        albu.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=10, val_shift_limit=10),
-        albu.RandomBrightnessContrast(),
-        albu.RandomShadow(shadow_dimension=4),
-    ]
-    return albu.Compose(train_transform)
 
-transforms = get_augmentation()
 
-dataset = SegmentationDataset(IMG_DIR, MASK_DIR, transforms)
 
-img, mask = dataset.getitem(1)
 
-fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-axes[0].imshow(img)
-axes[1].imshow(mask)
-plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from model import *
+from data import *
+
+#os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+
+data_gen_args = dict(rotation_range=0.2,
+                    width_shift_range=0.05,
+                    height_shift_range=0.05,
+                    shear_range=0.05,
+                    zoom_range=0.05,
+                    horizontal_flip=True,
+                    fill_mode='nearest')
+myGene = trainGenerator(2,'data/membrane/train','image','label',data_gen_args,save_to_dir = None)
+
+model = unet()
+model_checkpoint = ModelCheckpoint('unet_membrane.hdf5', monitor='loss',verbose=1, save_best_only=True)
+model.fit_generator(myGene,steps_per_epoch=300,epochs=1,callbacks=[model_checkpoint])
+
+testGene = testGenerator("data/membrane/test")
+results = model.predict_generator(testGene,30,verbose=1)
+saveResult("data/membrane/test",results)
