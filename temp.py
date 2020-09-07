@@ -1,77 +1,108 @@
-import numpy as np
 import cv2
-from calib import draw, calibration
-from get_ffc_end import get_ffc_end
-import consts
 import os
-import math
-
-input_img = cv2.imread("./ffc3_ibvs_0.JPG")
-
-# カメラパラメータ
-if os.path.isfile('./cameraparams.npz'):
-    # 前に記憶しておいたデータを読みだす
-    with np.load('./cameraparams.npz') as X:
-        mtx, dist, _, _ = [X[i] for i in ('mtx','dist','rvecs','tvecs')]
-else:
-    mtx, dist, _, _ = calibration()
-
-# mask
-hsv_min = np.array([90, 120, 100])
-hsv_max = np.array([120, 255, 255])
-
-hsv_img = cv2.cvtColor(input_img, cv2.COLOR_BGR2HSV)
-mask = cv2.inRange(hsv_img, hsv_min, hsv_max)
+import numpy as np
+from matplotlib import pyplot as plt
+import albumentations as albu
 
 
-masked_img = cv2.bitwise_and(hsv_img, hsv_img, mask=mask)
+# affine変換
+# flop
+# bright
+# shade
+# 背景と合成
 
-# 輪郭抽出
-contours, hierarchy = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-final_contours = []
-for i, contour in enumerate(contours):
-    # 小さすぎる/大きすぎる領域は除く
-    area = cv2.contourArea(contour)
-    print(area)
-    if 200 < area:
-        final_contours.append(contour)
-final_contour = final_contours[0]
+IMG_DIR = './image/'
+MASK_DIR = './label/'
 
-
-# 矩形
-rect = cv2.minAreaRect(final_contour)
-box = cv2.boxPoints(rect)
-box = np.int0(box)
-
-if np.linalg.norm([box[0]-box[1]]) > np.linalg.norm([box[0]-box[3]]) * 1.5:
-    ffc_end_box = np.array([box[2], box[3], box[1], box[0]])
-else:
-    ffc_end_box = np.array([box[1], box[2], box[0], box[3]])
-
-# PnP
-objp = np.array([[0, 0, 0], [consts.FFC_W, 0, 0], [0, consts.FFC_H, 0], [consts.FFC_W, consts.FFC_H, 0]]).astype(np.float32)
-corner = ffc_end_box.reshape([-1, 1, 2]).astype(np.float32)
-ret, rvec, tvec = cv2.solvePnP(objp, corner, mtx, dist)
+class SegmentationDataset():
+    def __init__(self, img_dir, mask_dir, transforms):
+        self.img_dir = img_dir
+        self.mask_dir = mask_dir
+        self.bg_dir = 'background'
+        self.transforms = transforms
+        self.img_ids = sorted(os.listdir(self.img_dir))
+        self.mask_ids = sorted(os.listdir(self.mask_dir))
+        self.bg_ids = sorted(os.listdir(self.bg_dir))
 
 
+    def getitem(self, idx):
+        img_name = self.img_ids[idx]
+        img = cv2.imread(os.path.join(self.img_dir, img_name))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-vector_0 = np.array([0, 0, 0]).reshape(-1, 1)
-vector_1 = np.array([consts.FFC_W, 0, 0]).reshape(-1, 1)
-vector_2 = np.array([consts.FFC_W, consts.FFC_H, 0]).reshape(-1, 1)
-vector_3 = np.array([0, consts.FFC_H, 0]).reshape(-1, 1)
-target_pos_0 = np.dot(cv2.Rodrigues(rvec)[0], vector_0) + tvec
-target_pos_1 = np.dot(cv2.Rodrigues(rvec)[0], vector_1) + tvec
-target_pos_2 = np.dot(cv2.Rodrigues(rvec)[0], vector_2) + tvec
-target_pos_3 = np.dot(cv2.Rodrigues(rvec)[0], vector_3) + tvec
-print("Target Z (Camera coordinate)")
-print(target_pos_0[-1]/1000, target_pos_1[-1]/1000, target_pos_2[-1]/1000, target_pos_3[-1]/1000)
+        mask_name = self.mask_ids[idx]
+        mask = cv2.imread(os.path.join(self.mask_dir, mask_name))
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
+
+        # 背景合成
+        bg_name = self.bg_ids[idx]
+        img_bg = cv2.imread(os.path.join(self.bg_dir, bg_name))
+        img_bg = cv2.cvtColor(img_bg, cv2.COLOR_BGR2RGB)
+        # マスク画像の白黒を反転
+        img_maskn = cv2.bitwise_not(mask)
+
+        # 背景からimg_msknの部分を切り出す
+        img_bg = cv2.bitwise_and(img_bg, img_maskn)
+
+        # 背景と合成
+        img = cv2.bitwise_or(img_bg, img)
+
+        augmented = self.transforms(image=img, mask=mask)
+        img, mask = augmented['image'], augmented['mask']
 
 
-# ３次元の点を平面に投影
-axis = np.float32([[consts.FFC_W,0,0], [0,consts.FFC_H,0], [0,0,-10]]).reshape(-1,3)
-imgpts, jac = cv2.projectPoints(axis, rvec, tvec, mtx, dist)
+        return img, mask
 
-img = draw(input_img, corner, imgpts)
-cv2.imshow('img', input_img)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+    def random_erasing(self, x):
+        image = np.zeros_like(x)
+        size = x.shape[2]
+        offset = np.random.randint(-4, 5, size=(2,))
+        mirror = np.random.randint(2)
+        remove = np.random.randint(2)
+        top, left = offset
+        left = max(0, left)
+        top = max(0, top)
+        right = min(size, left + size)
+        bottom = min(size, top + size)
+        if mirror > 0:
+            x = x[:, :, ::-1]
+        image[:, size - bottom:size - top, size - right:size - left] = x[:, top:bottom, left:right]
+        # Remove erasing start
+        if remove > 0:
+            while True:
+                s = np.random.uniform(0.02, 0.4) * size * size
+                r = np.random.uniform(-np.log(3.0), np.log(3.0))
+                r = np.exp(r)
+                w = int(np.sqrt(s / r))
+                h = int(np.sqrt(s * r))
+                left = np.random.randint(0, size)
+                top = np.random.randint(0, size)
+                if left + w < size and top + h < size:
+                    break
+            c = np.random.randint(-128, 128)
+            image[:, top:top + h, left:left + w] = c
+        # Remove erasing end
+        return image
+
+
+def get_augmentation():
+    train_transform = [
+        albu.Blur(),
+        albu.GaussNoise(),
+        albu.ShiftScaleRotate(shift_limit=0.4, scale_limit=0.2, rotate_limit=90),
+        albu.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=10, val_shift_limit=10),
+        albu.RandomBrightnessContrast(),
+        albu.RandomShadow(shadow_dimension=4),
+    ]
+    return albu.Compose(train_transform)
+
+transforms = get_augmentation()
+
+dataset = SegmentationDataset(IMG_DIR, MASK_DIR, transforms)
+
+img, mask = dataset.getitem(1)
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+axes[0].imshow(img)
+axes[1].imshow(mask)
+plt.show()
